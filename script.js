@@ -188,19 +188,24 @@ function processFrame() {
   ctx.restore();
 
   const image = ctx.getImageData(0, 0, width, height);
-  const component = findLargestComponent(image, width, height);
+  const components = findComponents(image, width, height);
 
   overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
 
-  if (component && component.area > 450) {
-    const features = extractFeatures(component, width, height);
-    const prediction = classifyGeometry(features);
+  const detection = findBestDetection(components, width, height);
 
-    if (prediction) {
-      updatePrediction(prediction.label, prediction.confidence, features, component, width, height);
-    } else {
-      updateRejected(features, component, width, height);
-    }
+  if (detection?.prediction) {
+    updatePrediction(
+      detection.prediction.label,
+      detection.prediction.confidence,
+      detection.features,
+      detection.component,
+      width,
+      height,
+    );
+  } else if (detection) {
+    const { features, component } = detection;
+    updateRejected(features, component, width, height);
   } else {
     updateIdle();
   }
@@ -208,7 +213,29 @@ function processFrame() {
   requestAnimationFrame(processFrame);
 }
 
-function findLargestComponent(image, width, height) {
+function findBestDetection(components, width, height) {
+  let bestMatch = null;
+  let bestRejected = null;
+
+  for (const component of components) {
+    if (component.area <= 130) continue;
+    const features = extractFeatures(component, width, height);
+    const prediction = classifyGeometry(features);
+
+    if (prediction) {
+      const score = prediction.confidence + Math.min(features.boxAreaRatio * 1.6, 0.24);
+      if (!bestMatch || score > bestMatch.score) {
+        bestMatch = { prediction, features, component, score };
+      }
+    } else if (!bestRejected || component.area > bestRejected.component.area) {
+      bestRejected = { features, component };
+    }
+  }
+
+  return bestMatch || bestRejected;
+}
+
+function findComponents(image, width, height) {
   const data = image.data;
   const mask = new Uint8Array(width * height);
   let sum = 0;
@@ -233,13 +260,13 @@ function findLargestComponent(image, width, height) {
     }
   }
 
-  return largestComponent(mask, width, height);
+  return connectedComponents(mask, width, height);
 }
 
-function largestComponent(mask, width, height) {
+function connectedComponents(mask, width, height) {
   const visited = new Uint8Array(mask.length);
   const queue = [];
-  let best = null;
+  const components = [];
 
   for (let start = 0; start < mask.length; start += 1) {
     if (!mask[start] || visited[start]) continue;
@@ -279,12 +306,12 @@ function largestComponent(mask, width, height) {
       }
     }
 
-    if (!best || area > best.area) {
-      best = { area, perimeter, minX, minY, maxX, maxY, pixels: queue.slice() };
+    if (area > 120) {
+      components.push({ area, perimeter, minX, minY, maxX, maxY, pixels: queue.slice() });
     }
   }
 
-  return best;
+  return components.sort((a, b) => b.area - a.area).slice(0, 16);
 }
 
 function extractFeatures(component, sourceWidth, sourceHeight) {
@@ -314,7 +341,7 @@ function extractFeatures(component, sourceWidth, sourceHeight) {
 
 function classifyGeometry(features) {
   if (
-    features.areaRatio < 0.006 ||
+    features.areaRatio < 0.0018 ||
     features.areaRatio > 0.24 ||
     features.boxAreaRatio > 0.36 ||
     features.aspectRatio < 0.48 ||
