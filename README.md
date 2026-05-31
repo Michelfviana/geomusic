@@ -6,8 +6,8 @@ webcam em comandos musicais.
 ## O que o projeto faz
 
 - Captura vídeo em tempo real pela webcam.
-- Extrai características da forma apresentada: circularidade, proporção e
-  preenchimento.
+- Extrai características da forma apresentada: circularidade, presença de cantos
+  e consistência radial.
 - Treina uma Árvore de Decisão no navegador usando exemplos sintéticos de
   círculo, quadrado e triângulo.
 - Classifica a forma detectada e toca uma nota musical diferente.

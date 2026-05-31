@@ -24,9 +24,9 @@ const SHAPES = {
 };
 
 const SHAPE_PROFILES = {
-  circle: { center: [0.86, 1.0, 0.76], tolerance: [0.24, 0.36, 0.22] },
-  square: { center: [0.66, 1.0, 0.91], tolerance: [0.22, 0.34, 0.16] },
-  triangle: { center: [0.5, 1.0, 0.56], tolerance: [0.2, 0.34, 0.2] },
+  circle: { center: [0.86, 0.08, 0.5], tolerance: [0.22, 0.16, 0.5] },
+  square: { center: [0.56, 0.34, 0.5], tolerance: [0.24, 0.2, 0.5] },
+  triangle: { center: [0.48, 0.2, 0.68], tolerance: [0.26, 0.2, 0.22] },
 };
 
 let tree;
@@ -139,9 +139,9 @@ function buildTrainingSet() {
     }
   };
 
-  add("circle", [0.86, 1.0, 0.76], [0.08, 0.16, 0.09]);
-  add("square", [0.66, 1.0, 0.91], [0.08, 0.14, 0.07]);
-  add("triangle", [0.50, 1.0, 0.56], [0.09, 0.18, 0.09]);
+  add("circle", [0.86, 0.08, 0.5], [0.09, 0.08, 0.18]);
+  add("square", [0.56, 0.34, 0.5], [0.1, 0.08, 0.14]);
+  add("triangle", [0.48, 0.2, 0.68], [0.11, 0.09, 0.12]);
   return rows;
 }
 
@@ -280,7 +280,7 @@ function largestComponent(mask, width, height) {
     }
 
     if (!best || area > best.area) {
-      best = { area, perimeter, minX, minY, maxX, maxY };
+      best = { area, perimeter, minX, minY, maxX, maxY, pixels: queue.slice() };
     }
   }
 
@@ -296,11 +296,15 @@ function extractFeatures(component, sourceWidth, sourceHeight) {
   const extent = component.area / (boxWidth * boxHeight);
   const areaRatio = component.area / (sourceWidth * sourceHeight);
   const boxAreaRatio = (boxWidth * boxHeight) / (sourceWidth * sourceHeight);
+  const advanced = extractShapeSignature(component, boxWidth, boxHeight);
 
   return {
     circularity: clamp(circularity, 0, 1),
     aspectRatio: clamp(aspectRatio, 0, 1.5),
     extent: clamp(extent, 0, 1),
+    radialConsistency: advanced.radialConsistency,
+    cornerDensity: advanced.cornerDensity,
+    bottomWeight: advanced.bottomWeight,
     areaRatio,
     boxAreaRatio,
     boxWidth,
@@ -320,16 +324,68 @@ function classifyGeometry(features) {
     return null;
   }
 
-  const treeLabel = tree.predict([features.circularity, features.aspectRatio, features.extent]);
+  const modelFeatures = [
+    features.radialConsistency,
+    features.cornerDensity,
+    features.bottomWeight,
+  ];
+  const treeLabel = tree.predict(modelFeatures);
   const profile = SHAPE_PROFILES[treeLabel];
-  const values = [features.circularity, features.aspectRatio, features.extent];
+  const values = modelFeatures;
   const distance = values.reduce((total, value, index) => {
     const normalized = (value - profile.center[index]) / profile.tolerance[index];
     return total + normalized * normalized;
   }, 0);
   const confidence = clamp(1 - Math.sqrt(distance / values.length), 0, 1);
 
-  return confidence >= 0.42 ? { label: treeLabel, confidence } : null;
+  if (features.aspectRatio < 0.62 && treeLabel !== "triangle") return null;
+  if (treeLabel === "circle" && features.cornerDensity > 0.22) return null;
+  if (treeLabel === "square" && features.cornerDensity < 0.18) return null;
+
+  return confidence >= 0.34 ? { label: treeLabel, confidence } : null;
+}
+
+function extractShapeSignature(component, boxWidth, boxHeight) {
+  const bins = new Array(36).fill(0);
+  const centerX = component.minX + boxWidth / 2;
+  const centerY = component.minY + boxHeight / 2;
+  const maxRadius = Math.hypot(boxWidth / 2, boxHeight / 2);
+  const cornerSizeX = Math.max(4, Math.floor(boxWidth * 0.24));
+  const cornerSizeY = Math.max(4, Math.floor(boxHeight * 0.24));
+  let cornerPixels = 0;
+  let bottomPixels = 0;
+
+  for (const index of component.pixels) {
+    const x = index % frame.width;
+    const y = Math.floor(index / frame.width);
+    const localX = x - component.minX;
+    const localY = y - component.minY;
+    const angle = Math.atan2(y - centerY, x - centerX) + Math.PI;
+    const bin = Math.min(bins.length - 1, Math.floor((angle / (Math.PI * 2)) * bins.length));
+    const radius = Math.hypot(x - centerX, y - centerY) / maxRadius;
+    bins[bin] = Math.max(bins[bin], radius);
+
+    const inLeft = localX <= cornerSizeX;
+    const inRight = localX >= boxWidth - cornerSizeX;
+    const inTop = localY <= cornerSizeY;
+    const inBottom = localY >= boxHeight - cornerSizeY;
+    if ((inLeft || inRight) && (inTop || inBottom)) {
+      cornerPixels += 1;
+    }
+    if (localY >= boxHeight * 0.55) {
+      bottomPixels += 1;
+    }
+  }
+
+  const activeBins = bins.filter((radius) => radius > 0.12);
+  const meanRadius = activeBins.reduce((sum, radius) => sum + radius, 0) / activeBins.length || 0;
+  const variance =
+    activeBins.reduce((sum, radius) => sum + (radius - meanRadius) ** 2, 0) / activeBins.length || 0;
+  const radialConsistency = clamp(1 - Math.sqrt(variance) * 3.2, 0, 1);
+  const cornerDensity = clamp(cornerPixels / component.area, 0, 1);
+  const bottomWeight = clamp(bottomPixels / component.area, 0, 1);
+
+  return { radialConsistency, cornerDensity, bottomWeight };
 }
 
 function updatePrediction(label, confidence, features, component, sourceWidth, sourceHeight) {
@@ -342,8 +398,8 @@ function updatePrediction(label, confidence, features, component, sourceWidth, s
   statusEl.textContent = `Forma detectada pela Árvore de Decisão: ${Math.round(confidence * 100)}%`;
 
   circularityMeter.value = features.circularity;
-  aspectMeter.value = features.aspectRatio;
-  extentMeter.value = features.extent;
+  aspectMeter.value = features.cornerDensity;
+  extentMeter.value = features.radialConsistency;
   drawDetectionBox(component, sourceWidth, sourceHeight, shape.color);
 
   if (label !== lastPlayedShape || now - lastPlayedAt > 900) {
@@ -361,8 +417,8 @@ function updateRejected(features, component, sourceWidth, sourceHeight) {
   predictionCard.style.borderColor = "var(--danger)";
   statusEl.textContent = "Aponte para uma forma escura simples em papel claro";
   circularityMeter.value = features.circularity;
-  aspectMeter.value = features.aspectRatio;
-  extentMeter.value = features.extent;
+  aspectMeter.value = features.cornerDensity;
+  extentMeter.value = features.radialConsistency;
   drawDetectionBox(component, sourceWidth, sourceHeight, "#ff6b6b");
   lastPlayedShape = "";
 }
