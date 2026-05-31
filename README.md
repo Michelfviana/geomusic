@@ -6,8 +6,8 @@ webcam em comandos musicais.
 ## O que o projeto faz
 
 - Captura vídeo em tempo real pela webcam.
-- Extrai características da forma apresentada: circularidade, presença de cantos
-  e consistência radial.
+- Usa como ponto de partida o notebook da aula: extrai características parecidas
+  com as do Colab, principalmente área aproximada do contorno e número de lados.
 - Treina uma Árvore de Decisão no navegador usando exemplos sintéticos de
   círculo, quadrado e triângulo.
 - Classifica a forma detectada e toca uma nota musical diferente.

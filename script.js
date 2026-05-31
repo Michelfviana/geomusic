@@ -24,9 +24,9 @@ const SHAPES = {
 };
 
 const SHAPE_PROFILES = {
-  circle: { center: [0.86, 0.08, 0.5], tolerance: [0.22, 0.16, 0.5] },
-  square: { center: [0.56, 0.34, 0.5], tolerance: [0.24, 0.2, 0.5] },
-  triangle: { center: [0.48, 0.2, 0.68], tolerance: [0.26, 0.2, 0.22] },
+  circle: { center: [0.09, 12], tolerance: [0.08, 5] },
+  square: { center: [0.1, 4], tolerance: [0.09, 1.6] },
+  triangle: { center: [0.08, 3], tolerance: [0.08, 1.4] },
 };
 
 let tree;
@@ -139,9 +139,9 @@ function buildTrainingSet() {
     }
   };
 
-  add("circle", [0.86, 0.08, 0.5], [0.09, 0.08, 0.18]);
-  add("square", [0.56, 0.34, 0.5], [0.1, 0.08, 0.14]);
-  add("triangle", [0.48, 0.2, 0.68], [0.11, 0.09, 0.12]);
+  add("circle", [0.09, 12], [0.055, 3.5], 120);
+  add("square", [0.1, 4], [0.055, 0.7], 120);
+  add("triangle", [0.08, 3], [0.05, 0.6], 120);
   return rows;
 }
 
@@ -324,6 +324,8 @@ function extractFeatures(component, sourceWidth, sourceHeight) {
   const areaRatio = component.area / (sourceWidth * sourceHeight);
   const boxAreaRatio = (boxWidth * boxHeight) / (sourceWidth * sourceHeight);
   const advanced = extractShapeSignature(component, boxWidth, boxHeight);
+  const notebookArea = boxAreaRatio;
+  const notebookSides = estimateNotebookSides(advanced);
 
   return {
     circularity: clamp(circularity, 0, 1),
@@ -332,6 +334,9 @@ function extractFeatures(component, sourceWidth, sourceHeight) {
     radialConsistency: advanced.radialConsistency,
     cornerDensity: advanced.cornerDensity,
     bottomWeight: advanced.bottomWeight,
+    radialPeaks: advanced.radialPeaks,
+    notebookArea,
+    notebookSides,
     areaRatio,
     boxAreaRatio,
     boxWidth,
@@ -351,11 +356,7 @@ function classifyGeometry(features) {
     return null;
   }
 
-  const modelFeatures = [
-    features.radialConsistency,
-    features.cornerDensity,
-    features.bottomWeight,
-  ];
+  const modelFeatures = [features.notebookArea, features.notebookSides];
   const treeLabel = tree.predict(modelFeatures);
   const profile = SHAPE_PROFILES[treeLabel];
   const values = modelFeatures;
@@ -365,11 +366,13 @@ function classifyGeometry(features) {
   }, 0);
   const confidence = clamp(1 - Math.sqrt(distance / values.length), 0, 1);
 
-  if (features.aspectRatio < 0.62 && treeLabel !== "triangle") return null;
-  if (treeLabel === "circle" && features.cornerDensity > 0.22) return null;
-  if (treeLabel === "square" && features.cornerDensity < 0.18) return null;
+  if (features.aspectRatio < 0.55 && treeLabel !== "triangle") return null;
+  if (treeLabel === "circle" && features.notebookSides < 7) return null;
+  if (treeLabel === "square" && (features.notebookSides < 3.2 || features.notebookSides > 5.8)) {
+    return null;
+  }
 
-  return confidence >= 0.34 ? { label: treeLabel, confidence } : null;
+  return confidence >= 0.28 ? { label: treeLabel, confidence } : null;
 }
 
 function extractShapeSignature(component, boxWidth, boxHeight) {
@@ -404,15 +407,51 @@ function extractShapeSignature(component, boxWidth, boxHeight) {
     }
   }
 
-  const activeBins = bins.filter((radius) => radius > 0.12);
+  const smoothedBins = bins.map((_, index) => {
+    const prev = bins[(index - 1 + bins.length) % bins.length];
+    const current = bins[index];
+    const next = bins[(index + 1) % bins.length];
+    return (prev + current + next) / 3;
+  });
+  const activeBins = smoothedBins.filter((radius) => radius > 0.12);
   const meanRadius = activeBins.reduce((sum, radius) => sum + radius, 0) / activeBins.length || 0;
   const variance =
     activeBins.reduce((sum, radius) => sum + (radius - meanRadius) ** 2, 0) / activeBins.length || 0;
   const radialConsistency = clamp(1 - Math.sqrt(variance) * 3.2, 0, 1);
+  const radialPeaks = countRadialPeaks(smoothedBins, meanRadius);
   const cornerDensity = clamp(cornerPixels / component.area, 0, 1);
   const bottomWeight = clamp(bottomPixels / component.area, 0, 1);
 
-  return { radialConsistency, cornerDensity, bottomWeight };
+  return { radialConsistency, radialPeaks, cornerDensity, bottomWeight };
+}
+
+function countRadialPeaks(bins, meanRadius) {
+  let peaks = 0;
+  const threshold = meanRadius + 0.045;
+
+  for (let index = 0; index < bins.length; index += 1) {
+    const prev = bins[(index - 1 + bins.length) % bins.length];
+    const current = bins[index];
+    const next = bins[(index + 1) % bins.length];
+    if (current > threshold && current >= prev && current >= next) {
+      peaks += 1;
+    }
+  }
+
+  return peaks;
+}
+
+function estimateNotebookSides(signature) {
+  if (signature.radialConsistency > 0.68 && signature.cornerDensity < 0.2) {
+    return 12;
+  }
+  if (signature.bottomWeight > 0.6 && signature.radialPeaks <= 4) {
+    return 3;
+  }
+  if (signature.cornerDensity >= 0.16 || (signature.radialPeaks >= 4 && signature.radialPeaks <= 6)) {
+    return 4;
+  }
+  return clamp(signature.radialPeaks, 3, 12);
 }
 
 function updatePrediction(label, confidence, features, component, sourceWidth, sourceHeight) {
@@ -424,9 +463,9 @@ function updatePrediction(label, confidence, features, component, sourceWidth, s
   predictionCard.style.borderColor = shape.color;
   statusEl.textContent = `Forma detectada pela Árvore de Decisão: ${Math.round(confidence * 100)}%`;
 
-  circularityMeter.value = features.circularity;
-  aspectMeter.value = features.cornerDensity;
-  extentMeter.value = features.radialConsistency;
+  circularityMeter.value = features.notebookArea;
+  aspectMeter.value = features.notebookSides;
+  extentMeter.value = confidence;
   drawDetectionBox(component, sourceWidth, sourceHeight, shape.color);
 
   if (label !== lastPlayedShape || now - lastPlayedAt > 900) {
@@ -443,9 +482,9 @@ function updateRejected(features, component, sourceWidth, sourceHeight) {
   shapeName.textContent = "Objeto ignorado";
   predictionCard.style.borderColor = "var(--danger)";
   statusEl.textContent = "Aponte para uma forma escura simples em papel claro";
-  circularityMeter.value = features.circularity;
-  aspectMeter.value = features.cornerDensity;
-  extentMeter.value = features.radialConsistency;
+  circularityMeter.value = features.notebookArea;
+  aspectMeter.value = features.notebookSides;
+  extentMeter.value = 0;
   drawDetectionBox(component, sourceWidth, sourceHeight, "#ff6b6b");
   lastPlayedShape = "";
 }
